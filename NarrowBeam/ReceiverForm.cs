@@ -13,6 +13,7 @@ internal sealed class ReceiverForm : Form
     private readonly ComboBox _presetComboBox;
     private readonly NumericUpDown _frequencyUpDown;
     private readonly NumericUpDown _gainUpDown;
+    private readonly ComboBox _sampleRateComboBox;
     private readonly Button _startButton;
     private readonly Button _stopButton;
     private readonly Label _statusLabel;
@@ -101,19 +102,32 @@ internal sealed class ReceiverForm : Form
             Size = new Size(60, 23),
         };
 
+        var sampleRateLabel = new Label { Text = "Sample Rate:", AutoSize = true, Location = new Point(175, 118) };
+        _sampleRateComboBox = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Location = new Point(265, 114),
+            Size = new Size(110, 23),
+        };
+        _sampleRateComboBox.Items.Add("2.0 MSPS");
+        _sampleRateComboBox.Items.Add("2.4 MSPS");
+        _sampleRateComboBox.Items.Add("2.56 MSPS");
+        _sampleRateComboBox.Items.Add("3.2 MSPS");
+        _sampleRateComboBox.SelectedIndex = 1; // default 2.4 MSPS
+
         _startButton = new Button
         {
             Text = "Start",
-            Location = new Point(280, 112),
-            Size = new Size(100, 28),
+            Location = new Point(390, 112),
+            Size = new Size(70, 28),
         };
         _startButton.Click += StartButton_Click;
 
         _stopButton = new Button
         {
             Text = "Stop",
-            Location = new Point(390, 112),
-            Size = new Size(100, 28),
+            Location = new Point(465, 112),
+            Size = new Size(70, 28),
             Enabled = false,
         };
         _stopButton.Click += StopButton_Click;
@@ -134,6 +148,8 @@ internal sealed class ReceiverForm : Form
         settingsGroup.Controls.Add(_frequencyUpDown);
         settingsGroup.Controls.Add(gainLabel);
         settingsGroup.Controls.Add(_gainUpDown);
+        settingsGroup.Controls.Add(sampleRateLabel);
+        settingsGroup.Controls.Add(_sampleRateComboBox);
         settingsGroup.Controls.Add(_startButton);
         settingsGroup.Controls.Add(_stopButton);
         settingsGroup.Controls.Add(_statusLabel);
@@ -296,6 +312,15 @@ internal sealed class ReceiverForm : Form
             int openRes = RtlSdr.rtlsdr_open(out _dev, index);
             if (openRes != 0) throw new InvalidOperationException($"Failed to open device: {openRes}");
 
+            // Parse selected sample rate
+            uint sampleRate = _sampleRateComboBox.SelectedIndex switch
+            {
+                0 => 2_000_000,
+                2 => 2_560_000,
+                3 => 3_200_000,
+                _ => 2_400_000,
+            };
+
             uint targetFreq = (uint)(_frequencyUpDown.Value * 1_000_000);
             
             // Set frequency (offset by 1 MHz to maximize bandwidth)
@@ -310,7 +335,7 @@ internal sealed class ReceiverForm : Form
             if (r < 0) throw new Exception("Failed to set frequency");
 
             // Set Sample Rate (2.4 MSPS for max stable BW)
-            r = RtlSdr.rtlsdr_set_sample_rate(_dev, 2_400_000);
+            r = RtlSdr.rtlsdr_set_sample_rate(_dev, sampleRate);
             if (r < 0) throw new Exception("Failed to set sample rate");
 
             // Set Gain
@@ -324,7 +349,7 @@ internal sealed class ReceiverForm : Form
             r = RtlSdr.rtlsdr_reset_buffer(_dev);
             if (r < 0) throw new Exception("Failed to reset buffer");
 
-            _demodulator = new AmVideoDemodulator(2_400_000);
+            _demodulator = new AmVideoDemodulator(sampleRate);
             ApplyTuning();
             _running = true;
 
