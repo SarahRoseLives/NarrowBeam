@@ -9,19 +9,25 @@ namespace NarrowBeam;
 /// </summary>
 internal sealed class LowPassFilter
 {
-    // Biquad sections
+    // Biquad sections for 8th order (4 sections)
     private readonly Biquad _section1;
     private readonly Biquad _section2;
+    private readonly Biquad _section3;
+    private readonly Biquad _section4;
 
     public LowPassFilter(double cutoffHz, double sampleRate)
     {
-        // 4th order Butterworth = 2 cascaded Biquads (2nd order sections)
-        // Q values for 4th order Butterworth:
-        // Q1 = 0.54119610
-        // Q2 = 1.3065630
+        // 8th order Butterworth = 4 cascaded Biquads
+        // Q values for 8th order Butterworth:
+        // Q1 = 0.50979558
+        // Q2 = 0.60134489
+        // Q3 = 0.89997622
+        // Q4 = 2.56291545
 
-        _section1 = new Biquad(cutoffHz, sampleRate, 0.54119610);
-        _section2 = new Biquad(cutoffHz, sampleRate, 1.3065630);
+        _section1 = new Biquad(cutoffHz, sampleRate, 0.50979558);
+        _section2 = new Biquad(cutoffHz, sampleRate, 0.60134489);
+        _section3 = new Biquad(cutoffHz, sampleRate, 0.89997622);
+        _section4 = new Biquad(cutoffHz, sampleRate, 2.56291545);
     }
 
     public void Apply(double[] buffer, int offset, int count)
@@ -29,6 +35,8 @@ internal sealed class LowPassFilter
         // Apply cascaded sections in-place
         _section1.Process(buffer, offset, count);
         _section2.Process(buffer, offset, count);
+        _section3.Process(buffer, offset, count);
+        _section4.Process(buffer, offset, count);
     }
 
     private class Biquad
