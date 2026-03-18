@@ -183,6 +183,9 @@ internal sealed class ReceiverForm : Form
         }
     }
 
+    // Offset tuning to avoid DC spike (LO leakage)
+    private const int TunerOffsetHz = 500_000; 
+
     private void StartButton_Click(object? sender, EventArgs e)
     {
         if (_deviceComboBox.SelectedIndex < 0) return;
@@ -195,24 +198,46 @@ internal sealed class ReceiverForm : Form
             int openRes = RtlSdr.rtlsdr_open(out _dev, index);
             if (openRes != 0) throw new InvalidOperationException($"Failed to open device: {openRes}");
 
-            uint freq = (uint)(_frequencyUpDown.Value * 1_000_000);
-            RtlSdr.Check(RtlSdr.rtlsdr_set_center_freq(_dev, freq), "set_center_freq");
-            RtlSdr.Check(RtlSdr.rtlsdr_set_sample_rate(_dev, 2_000_000), "set_sample_rate");
-            RtlSdr.Check(RtlSdr.rtlsdr_set_tuner_gain_mode(_dev, 0), "set_tuner_gain_mode"); // Auto
-            RtlSdr.Check(RtlSdr.rtlsdr_reset_buffer(_dev), "reset_buffer");
+            uint targetFreq = (uint)(_frequencyUpDown.Value * 1_000_000);
+            
+            // Set frequency (offset by 1 MHz to maximize bandwidth)
+            // Tuning Center = Target + 1.0 MHz.
+            // Target is at -1.0 MHz.
+            // Passband (2.4 MSPS) = -1.2 to +1.2 MHz.
+            // Video (USB) fits from -1.0 to +1.2 MHz (2.2 MHz BW).
+            uint tuneFreq = targetFreq + 1_000_000;
+            
+            int r;
+            r = RtlSdr.rtlsdr_set_center_freq(_dev, tuneFreq);
+            if (r < 0) throw new Exception("Failed to set frequency");
 
-            _demodulator = new AmVideoDemodulator(2_000_000);
+            // Set Sample Rate (2.4 MSPS for max stable BW)
+            r = RtlSdr.rtlsdr_set_sample_rate(_dev, 2_400_000);
+            if (r < 0) throw new Exception("Failed to set sample rate");
+
+            // Set Gain
+            r = RtlSdr.rtlsdr_set_tuner_gain_mode(_dev, 1); // Manual
+            if (r < 0) throw new Exception("Failed to set manual gain mode");
+
+            // Convert UI gain (dB) to tenths of dB for librtlsdr
+            int gainTenthsDb = (int)(_gainUpDown.Value * 10);
+            r = RtlSdr.rtlsdr_set_tuner_gain(_dev, gainTenthsDb);
+            
+            r = RtlSdr.rtlsdr_reset_buffer(_dev);
+            if (r < 0) throw new Exception("Failed to reset buffer");
+
+            _demodulator = new AmVideoDemodulator(2_400_000);
             _running = true;
 
-            _asyncCallback = new RtlSdr.ReadAsyncCallback(RxCallback);
-
+            // Important: rtlsdr_read_async blocks, so run in thread
             _rxThread = new Thread(RxLoop) { IsBackground = true };
             _rxThread.Start();
+            
             _videoTimer.Start();
 
             _startButton.Enabled = false;
             _stopButton.Enabled = true;
-            _statusLabel.Text = "Status: Receiving";
+            _statusLabel.Text = $"RX: {targetFreq/1e6:F3} MHz";
         }
         catch (Exception ex)
         {
@@ -223,9 +248,20 @@ internal sealed class ReceiverForm : Form
 
     private void RxLoop()
     {
-        if (_asyncCallback == null) return;
+        // Create the delegate and store it to prevent GC
+        _asyncCallback = new RtlSdr.ReadAsyncCallback(RxCallback);
         
-        RtlSdr.rtlsdr_read_async(_dev, _asyncCallback, IntPtr.Zero, 0, 0);
+        // This blocks until cancel_async is called or an error occurs
+        int result = RtlSdr.rtlsdr_read_async(_dev, _asyncCallback, IntPtr.Zero, 0, 0);
+        
+        if (result != 0)
+        {
+            // Handle error (invoked on RX thread)
+            this.Invoke((MethodInvoker)delegate {
+                 MessageBox.Show($"Async read failed: {result}");
+                 StopRx();
+            });
+        }
     }
 
     private void RxCallback(IntPtr buf, uint len, IntPtr ctx)
@@ -235,10 +271,14 @@ internal sealed class ReceiverForm : Form
             RtlSdr.rtlsdr_cancel_async(_dev);
             return;
         }
-
+        
         unsafe
         {
-            _demodulator?.ProcessIq((byte*)buf, (int)len);
+            // Process the raw IQ data
+            if (_demodulator != null)
+            {
+                _demodulator.ProcessIq((byte*)buf, (int)len);
+            }
         }
     }
 
@@ -279,9 +319,13 @@ internal sealed class ReceiverForm : Form
     {
         if (_demodulator != null && _running)
         {
-            Image? old = _videoBox.Image;
-            _videoBox.Image = _demodulator.GetFrame();
-            old?.Dispose();
+            var frame = _demodulator.GetFrame();
+            if (frame != null)
+            {
+                var old = _videoBox.Image;
+                _videoBox.Image = frame;
+                old?.Dispose();
+            }
         }
     }
 

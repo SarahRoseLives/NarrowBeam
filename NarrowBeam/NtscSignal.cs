@@ -47,15 +47,16 @@ internal sealed class NtscSignal
     private readonly int _activeSamples;
     private readonly double _phaseInc;
 
-    private readonly byte[] _rawFrame;
+    private readonly double[] _rawFrame;
     private volatile double[] _frontBuffer;
     private double[] _backBuffer;
+    private readonly double[] _lineCalculationBuffer; // Reusable buffer
     private readonly LowPassFilter? _lpf;
 
     private readonly ReaderWriterLockSlim _rawLock = new();
     private readonly ReaderWriterLockSlim _frameLock = new();
 
-    public byte[] RawFrameBuffer => _rawFrame;
+    public double[] RawFrameBuffer => _rawFrame;
     public double[] FrameBuffer => _frontBuffer;
 
     public NtscSignal(double sampleRate, double bandwidthHz = 0)
@@ -71,9 +72,10 @@ internal sealed class NtscSignal
         _activeSamples = (int)(52.6e-6 * sampleRate);
         _phaseInc = 2.0 * Math.PI * Fsc / sampleRate;
 
-        _rawFrame = new byte[FrameWidth * FrameHeight * 3];
+        _rawFrame = new double[FrameWidth * FrameHeight * 3];
         _frontBuffer = new double[_lineSamples * LinesPerFrame];
         _backBuffer = new double[_lineSamples * LinesPerFrame];
+        _lineCalculationBuffer = new double[_lineSamples];
 
         if (bandwidthHz > 0)
             _lpf = new LowPassFilter(bandwidthHz / 2.0, sampleRate);
@@ -124,9 +126,9 @@ internal sealed class NtscSignal
                 {
                     int src = srcOffset + (x * 3);
                     int dst = x * 3;
-                    rowBuffer[dst] = _rawFrame[src + 2];
-                    rowBuffer[dst + 1] = _rawFrame[src + 1];
-                    rowBuffer[dst + 2] = _rawFrame[src];
+                    rowBuffer[dst] = (byte)_rawFrame[src + 2];
+                    rowBuffer[dst + 1] = (byte)_rawFrame[src + 1];
+                    rowBuffer[dst + 2] = (byte)_rawFrame[src];
                 }
 
                 IntPtr rowPtr = IntPtr.Add(bitmapData.Scan0, y * bitmapData.Stride);
@@ -148,7 +150,7 @@ internal sealed class NtscSignal
 
         for (int line = 1; line <= LinesPerFrame; line++)
         {
-            double[] lineBuffer = GenerateLumaLine(line);
+            GenerateLumaLine(line, _lineCalculationBuffer);
             bool isVbi = (line >= 1 && line <= 21) || (line >= 264 && line <= 284);
 
             if (!isVbi)
@@ -157,12 +159,12 @@ internal sealed class NtscSignal
                 {
                     if (s >= _burstStartSamples && s < _burstEndSamples)
                     {
-                        lineBuffer[s] += BurstAmp * Math.Sin(subPhase + Math.PI);
+                        _lineCalculationBuffer[s] += BurstAmp * Math.Sin(subPhase + Math.PI);
                     }
                     else if (s >= _activeStartSamples && s < _activeStartSamples + _activeSamples)
                     {
                         GetPixelYiq(line, s, out _, out double iVal, out double qVal);
-                        lineBuffer[s] += iVal * Math.Cos(subPhase) + qVal * Math.Sin(subPhase);
+                        _lineCalculationBuffer[s] += iVal * Math.Cos(subPhase) + qVal * Math.Sin(subPhase);
                     }
 
                     subPhase += _phaseInc;
@@ -174,7 +176,7 @@ internal sealed class NtscSignal
             }
 
             int offset = (line - 1) * _lineSamples;
-            Array.Copy(lineBuffer, 0, _backBuffer, offset, _lineSamples);
+            Array.Copy(_lineCalculationBuffer, 0, _backBuffer, offset, _lineSamples);
         }
 
         _lpf?.Apply(_backBuffer, 0, _backBuffer.Length);
@@ -192,9 +194,8 @@ internal sealed class NtscSignal
         }
     }
 
-    private double[] GenerateLumaLine(int line)
+    private void GenerateLumaLine(int line, double[] buf)
     {
-        var buf = new double[_lineSamples];
         Array.Fill(buf, LevelBlanking);
 
         int lineInField = line > LinesPerFrame / 2 ? line - LinesPerFrame / 2 : line;
@@ -208,7 +209,7 @@ internal sealed class NtscSignal
                 buf[s] = LevelSync;
                 buf[halfLine + s] = LevelSync;
             }
-            return buf;
+            return;
         }
 
         if (lineInField >= 4 && lineInField <= 6)
@@ -218,7 +219,7 @@ internal sealed class NtscSignal
                 buf[s] = LevelSync;
                 buf[halfLine + s] = LevelSync;
             }
-            return buf;
+            return;
         }
 
         for (int s = 0; s < _hSyncSamples; s++)
@@ -232,8 +233,6 @@ internal sealed class NtscSignal
                 buf[_activeStartSamples + s] = y;
             }
         }
-
-        return buf;
     }
 
     private void GetPixelYiq(int line, int sampleInLine, out double y, out double iVal, out double qVal)
