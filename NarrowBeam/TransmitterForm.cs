@@ -67,12 +67,12 @@ internal sealed class TransmitterForm : Form
         var bandwidthLabel = new Label { Text = "Bandwidth:", AutoSize = true, Location = new Point(300, 76) };
         _bandwidthTrackBar = new TrackBar
         {
-            Minimum = 0,
+            Minimum = 2, // Start at 1.0 MHz (2 * 0.5)
             Maximum = 16,
             TickFrequency = 1,
             SmallChange = 1,
             LargeChange = 1,
-            Value = 0,
+            Value = 4, // Default 2.0 MHz
             Location = new Point(384, 64),
             Size = new Size(170, 45),
         };
@@ -80,7 +80,7 @@ internal sealed class TransmitterForm : Form
 
         _bandwidthValueLabel = new Label
         {
-            Text = "Unlimited",
+            Text = "2.0 MHz",
             AutoSize = true,
             Location = new Point(562, 76),
         };
@@ -282,6 +282,6 @@ internal sealed class TransmitterForm : Form
     private void UpdateBandwidthLabel()
     {
         double bw = GetBandwidthMHz();
-        _bandwidthValueLabel.Text = bw > 0 ? $"{bw:F1} MHz" : "Unlimited";
+        _bandwidthValueLabel.Text = $"{bw:F1} MHz";
     }
 }

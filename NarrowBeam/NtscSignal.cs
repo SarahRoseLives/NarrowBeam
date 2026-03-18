@@ -13,6 +13,7 @@ internal sealed class NtscSignal
     private const double FrameRate       = 30_000.0 / 1_001.0;
     private const double Fsc             = 3_579_545.4545;
     private const int    LinesPerFrame   = 525;
+    private const int    FilterOrder     = 4; // IIR order (Butterworth)
 
     private const double LevelSync     = -40.0;
     private const double LevelBlanking =   0.0;
@@ -82,7 +83,7 @@ internal sealed class NtscSignal
         _backBuffer  = new double[_lineSamples * LinesPerFrame];
 
         if (bandwidthHz > 0)
-            _lpf = new LowPassFilter(127, bandwidthHz / 2.0, sampleRate);
+            _lpf = new LowPassFilter(bandwidthHz / 2.0, sampleRate);
     }
 
     public static double IreToAmplitude(double ire) =>
