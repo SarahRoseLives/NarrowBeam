@@ -46,14 +46,15 @@ internal sealed class NtscSignal
     private readonly double   _phaseInc;
 
     private readonly byte[]   _rawFrame;
-    private readonly double[] _frameBuffer;
+    private volatile double[] _frontBuffer;
+    private double[]          _backBuffer;
     private readonly LowPassFilter? _lpf;
 
     private readonly ReaderWriterLockSlim _rawLock   = new();
-    private readonly ReaderWriterLockSlim _frameLock = new();
+    private readonly object           _swapLock  = new();
 
     public byte[]   RawFrameBuffer => _rawFrame;
-    public double[] FrameBuffer    => _frameBuffer;
+    public double[] FrameBuffer    => _frontBuffer;
 
     /// <param name="sampleRate">HackRF sample rate in Hz (e.g. 8_000_000).</param>
     /// <param name="bandwidthHz">
@@ -77,7 +78,8 @@ internal sealed class NtscSignal
         _phaseInc           = 2.0 * Math.PI * Fsc / sampleRate;
 
         _rawFrame    = new byte[FrameWidth * FrameHeight * 3];
-        _frameBuffer = new double[_lineSamples * LinesPerFrame];
+        _frontBuffer = new double[_lineSamples * LinesPerFrame];
+        _backBuffer  = new double[_lineSamples * LinesPerFrame];
 
         if (bandwidthHz > 0)
             _lpf = new LowPassFilter(127, bandwidthHz / 2.0, sampleRate);
@@ -91,10 +93,26 @@ internal sealed class NtscSignal
     public void UnlockRaw()    => _rawLock.ExitWriteLock();
     public void RLockRaw()     => _rawLock.EnterReadLock();
     public void RUnlockRaw()   => _rawLock.ExitReadLock();
-    public void LockFrame()    => _frameLock.EnterWriteLock();
-    public void UnlockFrame()  => _frameLock.ExitWriteLock();
-    public void RLockFrame()   => _frameLock.EnterReadLock();
-    public void RUnlockFrame() => _frameLock.ExitReadLock();
+    
+    // Frame locking is no longer needed for generation, only for swapping.
+    // We keep these methods to satisfy existing callers but they will be no-ops or minimal.
+    // Actually, TransferCallback uses RLockFrame to protect against reading while writing.
+    // With double buffering, we just need to ensure the pointer _frontBuffer doesn't change WHILE we are reading it?
+    // No, atomic reference swap is fine. But we are reading the ARRAY content.
+    // If we swap the array, the old array instance is still valid (it becomes the backbuffer).
+    // BUT the writer (GenerateFullFrame) will immediately start writing to the NEW backbuffer (which was the OLD frontbuffer).
+    // So if TransferCallback is still reading the OLD frontbuffer (now backbuffer), we have a race.
+    // So we DO need a lock. But the writer only holds the lock during the SWAP, not during GENERATION.
+    
+    public void LockFrame()    { /* No-op, generation happens on backbuffer */ }
+    public void UnlockFrame()  { /* No-op */ }
+    
+    // RLockFrame is used by TransferCallback. It should effectively "pin" the current buffer.
+    // But since we want to avoid blocking, maybe we can just use a shared lock that is only taken exclusively during swap.
+    private readonly ReaderWriterLockSlim _swapRwLock = new();
+
+    public void RLockFrame()   => _swapRwLock.EnterReadLock();
+    public void RUnlockFrame() => _swapRwLock.ExitReadLock();
 
     // ── Test pattern ─────────────────────────────────────────────────────────
     public void FillColorBars()
@@ -115,6 +133,9 @@ internal sealed class NtscSignal
     public void GenerateFullFrame()
     {
         double subPhase = 0.0;
+        
+        // We write to _backBuffer. No lock needed yet as we are the only writer.
+        // (Assuming GenerateFullFrame is not called concurrently, which WebcamCapture ensures).
 
         for (int line = 1; line <= LinesPerFrame; line++)
         {
@@ -143,11 +164,24 @@ internal sealed class NtscSignal
             }
 
             int offset = (line - 1) * _lineSamples;
-            Array.Copy(lineBuffer, 0, _frameBuffer, offset, _lineSamples);
+            Array.Copy(lineBuffer, 0, _backBuffer, offset, _lineSamples);
         }
 
-        // Apply bandwidth-limiting LPF to the finished frame if configured
-        _lpf?.Apply(_frameBuffer, 0, _frameBuffer.Length);
+        // Apply bandwidth-limiting LPF to the back buffer if configured
+        _lpf?.Apply(_backBuffer, 0, _backBuffer.Length);
+
+        // Swap buffers
+        _swapRwLock.EnterWriteLock();
+        try
+        {
+            double[] temp = _frontBuffer;
+            _frontBuffer = _backBuffer;
+            _backBuffer = temp;
+        }
+        finally
+        {
+            _swapRwLock.ExitWriteLock();
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────────
