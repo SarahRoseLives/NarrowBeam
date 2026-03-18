@@ -113,7 +113,7 @@ internal sealed class ReceiverForm : Form
         _sampleRateComboBox.Items.Add("2.4 MSPS");
         _sampleRateComboBox.Items.Add("2.56 MSPS");
         _sampleRateComboBox.Items.Add("3.2 MSPS");
-        _sampleRateComboBox.SelectedIndex = 1; // default 2.4 MSPS
+        _sampleRateComboBox.SelectedIndex = 3; // default 3.2 MSPS
 
         _startButton = new Button
         {
