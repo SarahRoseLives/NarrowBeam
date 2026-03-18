@@ -113,178 +113,171 @@ internal sealed class AmVideoDemodulator
 
         for (int i = 0; i < samples; i++)
         {
-            // ── 1. IQ → magnitude ───────────────────────────────────────────
+            // ── 1. IQ → magnitude (unsigned RTL-SDR format: 0–255, bias 127.5) ─
             double iSample = iqData[i * 2]     - 127.5;
             double qSample = iqData[i * 2 + 1] - 127.5;
+            ProcessSample(iSample, qSample, AgcAttack, AgcDecay);
+        }
+    }
 
-            // DC blocker (removes hardware LO leakage at 0 Hz)
-            _dcI = _dcI * (1.0 - DcAlpha) + iSample * DcAlpha;
-            _dcQ = _dcQ * (1.0 - DcAlpha) + qSample * DcAlpha;
-            double iClean = iSample - _dcI;
-            double qClean = qSample - _dcQ;
+    /// <summary>Process HackRF signed IQ (sbyte, -128..+127).</summary>
+    public unsafe void ProcessIqSigned(sbyte* iqData, int length)
+    {
+        int samples = length / 2;
+        const double AgcAttack = 0.001;
+        const double AgcDecay  = 0.000005;
+        for (int i = 0; i < samples; i++)
+        {
+            double iSample = iqData[i * 2];
+            double qSample = iqData[i * 2 + 1];
+            ProcessSample(iSample, qSample, AgcAttack, AgcDecay);
+        }
+    }
 
-            // Fast magnitude approximation
-            double absI = iClean > 0 ? iClean : -iClean;
-            double absQ = qClean > 0 ? qClean : -qClean;
-            double mag = (absI > absQ ? absI : absQ) + 0.4 * (absI > absQ ? absQ : absI);
+    private void ProcessSample(double iSample, double qSample, double agcAttack, double agcDecay)
+    {
+        // DC blocker (removes hardware LO leakage at 0 Hz)
+        _dcI = _dcI * (1.0 - DcAlpha) + iSample * DcAlpha;
+        _dcQ = _dcQ * (1.0 - DcAlpha) + qSample * DcAlpha;
+        double iClean = iSample - _dcI;
+        double qClean = qSample - _dcQ;
 
-            // ── 2. Post-demod low-pass filter ────────────────────────────────
-            // Single-stage IIR. LpfAlpha is tunable (0.5=smooth → 1.0=sharp).
-            // Sync detection uses raw magnitude so edges stay sharp.
-            _lpf1 = _lpf1 + LpfAlpha * (mag - _lpf1);
-            double filteredMag = _lpf1;
+        // Fast magnitude approximation
+        double absI = iClean > 0 ? iClean : -iClean;
+        double absQ = qClean > 0 ? qClean : -qClean;
+        double mag = (absI > absQ ? absI : absQ) + 0.4 * (absI > absQ ? absQ : absI);
 
-            // ── 3. AGC (tracks on raw magnitude to catch sync tips accurately) ─
-            if (mag > _smoothedMax)
-                _smoothedMax = _smoothedMax * (1.0 - AgcAttack) + mag * AgcAttack;
-            else
-                _smoothedMax = _smoothedMax * (1.0 - AgcDecay)  + mag * AgcDecay;
+        // ── 2. Post-demod low-pass filter ────────────────────────────────
+        // Single-stage IIR. LpfAlpha is tunable (0.5=smooth → 1.0=sharp).
+        // Sync detection uses raw magnitude so edges stay sharp.
+        _lpf1 = _lpf1 + LpfAlpha * (mag - _lpf1);
+        double filteredMag = _lpf1;
 
-            if (mag < _smoothedMin)
-                _smoothedMin = _smoothedMin * (1.0 - AgcAttack) + mag * AgcAttack;
-            else
-                _smoothedMin = _smoothedMin * (1.0 - AgcDecay)  + mag * AgcDecay;
+        // ── 3. AGC (tracks on raw magnitude to catch sync tips accurately) ─
+        if (mag > _smoothedMax)
+            _smoothedMax = _smoothedMax * (1.0 - agcAttack) + mag * agcAttack;
+        else
+            _smoothedMax = _smoothedMax * (1.0 - agcDecay)  + mag * agcDecay;
 
-            double range = _smoothedMax - _smoothedMin;
-            if (range < 1.0) range = 1.0;
+        if (mag < _smoothedMin)
+            _smoothedMin = _smoothedMin * (1.0 - agcAttack) + mag * agcAttack;
+        else
+            _smoothedMin = _smoothedMin * (1.0 - agcDecay)  + mag * agcDecay;
 
-            // ── 4. Sync detection (on raw mag — needs sharp edges) ───────────
-            // NTSC negative modulation: sync tips are at MAX RF level.
-            bool isSyncSample = mag > (_smoothedMax - range * SyncThreshold);
+        double range = _smoothedMax - _smoothedMin;
+        if (range < 1.0) range = 1.0;
 
-            if (isSyncSample && !_inSyncPulse)
+        // ── 4. Sync detection (on raw mag — needs sharp edges) ───────────
+        // NTSC negative modulation: sync tips are at MAX RF level.
+        bool isSyncSample = mag > (_smoothedMax - range * SyncThreshold);
+
+        if (isSyncSample && !_inSyncPulse)
+        {
+            // ── Rising edge of sync ──────────────────────────────────────
+            _inSyncPulse = true;
+            _pixelCounter = 0;
+            _lastPx = -1;
+
+            const double Kp = 0.4;
+            const double Kf = 0.0005;
+            double phaseError = _x;
+            _x              -= Kp * phaseError;
+            _samplesPerLine -= Kf * phaseError;
+
+            double lo = _nominalSamplesPerLine * 0.85;
+            double hi = _nominalSamplesPerLine * 1.15;
+            if (_samplesPerLine < lo) _samplesPerLine = lo;
+            if (_samplesPerLine > hi) _samplesPerLine = hi;
+        }
+        else if (!isSyncSample && _inSyncPulse)
+        {
+            // ── Falling edge – classify by pulse width ───────────────────
+            _inSyncPulse = false;
+
+            double hMin = _samplesPerLine * 0.05;
+            double hMax = _samplesPerLine * 0.20;
+            double vMin = _samplesPerLine * 0.35;
+
+            if (_pixelCounter > hMin && _pixelCounter <= hMax)
             {
-                // ── Rising edge of sync ──────────────────────────────────────
-                _inSyncPulse = true;
-                _pixelCounter = 0;
-                _lastPx = -1;
-
-                // H-sync PLL: steer phase and frequency toward lock.
-                // _x should be ~0 at each rising edge when locked.
-                // Kp corrects phase immediately; Kf drifts the period slowly.
-                const double Kp = 0.4;
-                const double Kf = 0.0005;
-                double phaseError = _x;
-                _x        -= Kp * phaseError;
-                _samplesPerLine -= Kf * phaseError;
-
-                // Clamp period to ±15% of nominal to prevent runaway
-                double lo = _nominalSamplesPerLine * 0.85;
-                double hi = _nominalSamplesPerLine * 1.15;
-                if (_samplesPerLine < lo) _samplesPerLine = lo;
-                if (_samplesPerLine > hi) _samplesPerLine = hi;
-            }
-            else if (!isSyncSample && _inSyncPulse)
-            {
-                // ── Falling edge – classify by pulse width ───────────────────
-                _inSyncPulse = false;
-
-                // At 2.4 MSPS:
-                //   Equalizing ≈ 2.3 µs  →  ~5.5 samples  (ignored — < hMin)
-                //   H-sync     ≈ 4.7 µs  → ~11.3 samples
-                //   V-sync     ≈ 27.1 µs → ~65   samples
-                //
-                // hMin rejects equalizing pulses that would otherwise count as H-sync
-                // and vertically shift the raster by ~12 lines per frame.
-                double hMin = _samplesPerLine * 0.05;   // > 5 %  → not equalizing
-                double hMax = _samplesPerLine * 0.20;   // < 20 % → H-sync
-                double vMin = _samplesPerLine * 0.35;   // > 35 % → V-sync broad
-
-                if (_pixelCounter > hMin && _pixelCounter <= hMax)
+                if (_vsyncPending && _y > 400)
                 {
-                    if (_vsyncPending && _y > 400)
+                    BeginNewFrame(_y > 30);
+                    _vsyncPending = false;
+                    _vSyncIntegrator = 0;
+                    _y++;
+                }
+                else
+                {
+                    if (_vsyncPending)
                     {
-                        // Full-frame V-sync (field 1 boundary) — reset display frame.
-                        BeginNewFrame(_y > 30);
                         _vsyncPending = false;
                         _vSyncIntegrator = 0;
-                        _y++;
                     }
-                    else
-                    {
-                        // Normal H-sync, or mid-frame field-2 V-sync (ignored as frame boundary).
-                        if (_vsyncPending)
-                        {
-                            // Field-2 V-sync: reset detector, keep counting lines.
-                            _vsyncPending = false;
-                            _vSyncIntegrator = 0;
-                        }
-                        _y++;
-                        if (_vSyncIntegrator > 0) _vSyncIntegrator--;
-                    }
+                    _y++;
+                    if (_vSyncIntegrator > 0) _vSyncIntegrator--;
                 }
-                else if (_pixelCounter >= vMin)
-                {
-                    // V-sync broad pulse — accumulate until we're confident
-                    _vSyncIntegrator++;
-                    if (_vSyncIntegrator >= 3)
-                        _vsyncPending = true;
-                }
-                // Equalizing pulses (< hMin) and anything in-between fall through.
             }
-
-            if (_inSyncPulse) _pixelCounter++;
-
-            // ── 5. Draw pixel (with gap-filling) ─────────────────────────────
-            if (!_inSyncPulse && _y >= 0 && _y < FrameHeight)
+            else if (_pixelCounter >= vMin)
             {
-                double activeStart = _samplesPerLine * ActiveStart;
-                double activeWidth = _samplesPerLine * ActiveWidth;
-
-                if (_x >= activeStart)
-                {
-                    int px = (int)((_x - activeStart) / activeWidth * FrameWidth);
-
-                    if (px >= 0 && px < FrameWidth)
-                    {
-                        // NTSC levels (negative modulation)
-                        double blackLevel = _smoothedMax - range * BlackLevelOffset;
-                        double whiteLevel = _smoothedMin + range * 0.05;
-                        double videoRange = blackLevel - whiteLevel;
-                        if (videoRange < 1.0) videoRange = 1.0;
-
-                        // Use filtered magnitude for pixel brightness
-                        double brightness = (blackLevel - filteredMag) / videoRange;
-                        if (brightness < 0.0) brightness = 0.0;
-                        if (brightness > 1.0) brightness = 1.0;
-
-                        byte b = (byte)(brightness * 255.0);
-
-                        // Fill every pixel from _lastPx+1 to px so the raster has
-                        // no dark gaps between the sparse IQ sample positions.
-                        int fillFrom = (_lastPx < 0) ? px : _lastPx + 1;
-                        int rowBase  = _y * FrameWidth;
-                        for (int p = fillFrom; p <= px && p < FrameWidth; p++)
-                        {
-                            int idx = (rowBase + p) * 3;
-                            _frameBuffer[idx]     = b;
-                            _frameBuffer[idx + 1] = b;
-                            _frameBuffer[idx + 2] = b;
-                        }
-
-                        _lastPx = px;
-                    }
-                }
+                _vSyncIntegrator++;
+                if (_vSyncIntegrator >= 3)
+                    _vsyncPending = true;
             }
-
-            // ── 6. Advance horizontal counter (PLL phase accumulator) ────────
-            _x++;
-
-            // Horizontal flywheel: fires only if no H-sync arrives within one
-            // full line period. With PLL locked this should never trigger.
-            if (_x > _samplesPerLine * 1.1)
-            {
-                _x = 0;
-                _y++;
-                _lastPx = -1;
-            }
-
-            // Vertical flywheel: safety net ONLY — should not fire during normal operation.
-            // A full NTSC frame is 525 lines; V-sync triggers BeginNewFrame at _y ≈ 509.
-            // Set ceiling well above that so V-sync always fires first.
-            if (_y >= 540)
-                BeginNewFrame(true);
         }
+
+        if (_inSyncPulse) _pixelCounter++;
+
+        // ── 5. Draw pixel (with gap-filling) ─────────────────────────────
+        if (!_inSyncPulse && _y >= 0 && _y < FrameHeight)
+        {
+            double activeStart = _samplesPerLine * ActiveStart;
+            double activeWidth = _samplesPerLine * ActiveWidth;
+
+            if (_x >= activeStart)
+            {
+                int px = (int)((_x - activeStart) / activeWidth * FrameWidth);
+
+                if (px >= 0 && px < FrameWidth)
+                {
+                    double blackLevel = _smoothedMax - range * BlackLevelOffset;
+                    double whiteLevel = _smoothedMin + range * 0.05;
+                    double videoRange = blackLevel - whiteLevel;
+                    if (videoRange < 1.0) videoRange = 1.0;
+
+                    double brightness = (blackLevel - filteredMag) / videoRange;
+                    if (brightness < 0.0) brightness = 0.0;
+                    if (brightness > 1.0) brightness = 1.0;
+
+                    byte b = (byte)(brightness * 255.0);
+
+                    int fillFrom = (_lastPx < 0) ? px : _lastPx + 1;
+                    int rowBase  = _y * FrameWidth;
+                    for (int p = fillFrom; p <= px && p < FrameWidth; p++)
+                    {
+                        int idx = (rowBase + p) * 3;
+                        _frameBuffer[idx]     = b;
+                        _frameBuffer[idx + 1] = b;
+                        _frameBuffer[idx + 2] = b;
+                    }
+
+                    _lastPx = px;
+                }
+            }
+        }
+
+        // ── 6. Advance horizontal counter (PLL phase accumulator) ────────
+        _x++;
+
+        if (_x > _samplesPerLine * 1.1)
+        {
+            _x = 0;
+            _y++;
+            _lastPx = -1;
+        }
+
+        if (_y >= 540)
+            BeginNewFrame(true);
     }
 
     public Bitmap GetFrame()

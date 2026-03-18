@@ -14,8 +14,6 @@ internal static class HackRf
 
     public const int Success = 0;
 
-    // TX callback signature: fill *buffer with (buffer_length) bytes of signed IQ (interleaved I,Q as sbyte).
-    // Return 0 to continue, non-zero to stop.
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     public delegate int TransferCallback(ref Transfer transfer);
 
@@ -38,6 +36,18 @@ internal static class HackRf
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern int hackrf_open(out IntPtr device);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int hackrf_open_by_serial(string desiredSerialNumber, out IntPtr device);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern IntPtr hackrf_device_list();
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int hackrf_device_list_open(IntPtr list, int idx, out IntPtr device);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern void hackrf_device_list_free(IntPtr list);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern int hackrf_close(IntPtr device);
