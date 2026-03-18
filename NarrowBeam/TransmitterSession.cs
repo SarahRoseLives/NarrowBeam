@@ -17,6 +17,7 @@ internal sealed class TransmitterSession : IDisposable
     private int _sampleCounter;
 
     public bool IsRunning => _streaming;
+    public NtscSignal? NtscSignal => _ntsc;
 
     public TransmitterSession(Action<string> log)
     {

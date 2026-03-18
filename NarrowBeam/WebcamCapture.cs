@@ -78,33 +78,45 @@ internal sealed class WebcamCapture : IDisposable
 
     private void ReadLoop()
     {
-        int frameSize = NtscSignal.FrameWidth * NtscSignal.FrameHeight * 3;
-        var frameBuf = new byte[frameSize];
-        Stream stdout = _ffmpeg.StandardOutput.BaseStream;
-
-        while (_running)
+        try
         {
-            int bytesRead = 0;
-            while (bytesRead < frameSize)
+            int frameSize = NtscSignal.FrameWidth * NtscSignal.FrameHeight * 3;
+            var frameBuf = new byte[frameSize];
+            Stream stdout = _ffmpeg.StandardOutput.BaseStream;
+
+            while (_running)
             {
-                int read = stdout.Read(frameBuf, bytesRead, frameSize - bytesRead);
-                if (read == 0)
+                int bytesRead = 0;
+                while (bytesRead < frameSize)
                 {
-                    _running = false;
-                    _log?.Invoke("FFmpeg stream ended.");
-                    return;
+                    int read = stdout.Read(frameBuf, bytesRead, frameSize - bytesRead);
+                    if (read == 0)
+                    {
+                        _running = false;
+                        _log?.Invoke("FFmpeg stream ended.");
+                        return;
+                    }
+
+                    bytesRead += read;
                 }
 
-                bytesRead += read;
+                _ntsc.LockRaw();
+                try
+                {
+                    Array.Copy(frameBuf, _ntsc.RawFrameBuffer, frameSize);
+                }
+                finally
+                {
+                    _ntsc.UnlockRaw();
+                }
+
+                _ntsc.GenerateFullFrame();
             }
-
-            _ntsc.LockRaw();
-            Array.Copy(frameBuf, _ntsc.RawFrameBuffer, frameSize);
-            _ntsc.UnlockRaw();
-
-            _ntsc.LockFrame();
-            _ntsc.GenerateFullFrame();
-            _ntsc.UnlockFrame();
+        }
+        catch (Exception ex)
+        {
+            _running = false;
+            _log?.Invoke($"Webcam capture failed: {ex.Message}");
         }
     }
 
@@ -114,6 +126,9 @@ internal sealed class WebcamCapture : IDisposable
 
         if (!_ffmpeg.HasExited)
             _ffmpeg.Kill(entireProcessTree: true);
+
+        if (_readerThread.IsAlive)
+            _readerThread.Join(TimeSpan.FromSeconds(2));
 
         _ffmpeg.Dispose();
     }

@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.IO;
 using System.Windows.Forms;
 
 namespace NarrowBeam;
@@ -20,20 +21,33 @@ internal sealed class TransmitterForm : Form
     private readonly Button _stopButton;
     private readonly Label _statusLabel;
     private readonly TextBox _logTextBox;
+    private readonly PictureBox _previewBox;
+    private readonly System.Windows.Forms.Timer _previewTimer;
 
+    private readonly AppSettings _appSettings;
+    private bool _updatingPresetFromCode;
     private TransmitterSession? _session;
 
     public TransmitterForm()
     {
+        _appSettings = LoadSettings();
+
         Text = "NarrowBeam - Transmitter";
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(760, 560);
+        ClientSize = new Size(1000, 560);
 
         var settingsGroup = new GroupBox
         {
             Text = "Transmitter Settings",
             Location = new Point(16, 16),
-            Size = new Size(728, 260),
+            Size = new Size(540, 260),
+        };
+
+        var previewGroup = new GroupBox
+        {
+            Text = "Live Monitor",
+            Location = new Point(570, 16),
+            Size = new Size(410, 360),
         };
 
         var deviceLabel = new Label { Text = "Camera:", AutoSize = true, Location = new Point(20, 34) };
@@ -41,13 +55,13 @@ internal sealed class TransmitterForm : Form
         {
             DropDownStyle = ComboBoxStyle.DropDownList,
             Location = new Point(100, 30),
-            Size = new Size(440, 23),
+            Size = new Size(330, 23),
         };
 
         _refreshDevicesButton = new Button
         {
             Text = "Refresh",
-            Location = new Point(560, 28),
+            Location = new Point(440, 28),
             Size = new Size(90, 27),
         };
         _refreshDevicesButton.Click += (_, _) => RefreshDevices();
@@ -59,10 +73,10 @@ internal sealed class TransmitterForm : Form
             Location = new Point(100, 72),
             Size = new Size(160, 23),
         };
-        _presetComboBox.Items.Add(new AtvChannel("Custom", 0)); // Placeholder for manual
-        foreach (var ch in AtvChannels.All)
-            _presetComboBox.Items.Add(ch);
-        _presetComboBox.DisplayMember = "Name";
+        _presetComboBox.Items.Add(new AtvChannel("Custom", 0));
+        foreach (AtvChannel channel in AtvChannels.All)
+            _presetComboBox.Items.Add(channel);
+        _presetComboBox.DisplayMember = nameof(AtvChannel.Name);
         _presetComboBox.SelectedIndexChanged += PresetChanged;
 
         var frequencyLabel = new Label { Text = "Frequency:", AutoSize = true, Location = new Point(280, 76) };
@@ -72,27 +86,23 @@ internal sealed class TransmitterForm : Form
             Increment = 0.250M,
             Minimum = 1,
             Maximum = 6000,
-            Value = 427.250M,
+            Value = _appSettings.FrequencyMhz,
             Location = new Point(350, 72),
             Size = new Size(100, 23),
         };
-        _frequencyUpDown.ValueChanged += (_, _) => 
-        {
-            if (_presetComboBox.SelectedItem is AtvChannel ch && ch.FrequencyMhz != _frequencyUpDown.Value)
-                _presetComboBox.SelectedIndex = 0; // Switch to "Custom" if manual freq change
-        };
+        _frequencyUpDown.ValueChanged += FrequencyChanged;
 
-        var mhzLabel1 = new Label { Text = "MHz", AutoSize = true, Location = new Point(455, 76) };
+        var mhzLabel = new Label { Text = "MHz", AutoSize = true, Location = new Point(455, 76) };
 
         var bandwidthLabel = new Label { Text = "Bandwidth:", AutoSize = true, Location = new Point(20, 118) };
         _bandwidthTrackBar = new TrackBar
         {
-            Minimum = 2, // Start at 1.0 MHz (2 * 0.5)
+            Minimum = 2,
             Maximum = 16,
             TickFrequency = 1,
             SmallChange = 1,
             LargeChange = 1,
-            Value = 4, // Default 2.0 MHz
+            Value = Math.Clamp((int)Math.Round(_appSettings.BandwidthMhz * 2.0), 2, 16),
             Location = new Point(100, 106),
             Size = new Size(170, 45),
         };
@@ -100,7 +110,7 @@ internal sealed class TransmitterForm : Form
 
         _bandwidthValueLabel = new Label
         {
-            Text = "2.0 MHz",
+            Text = $"{GetBandwidthMHz():F1} MHz",
             AutoSize = true,
             Location = new Point(280, 118),
         };
@@ -110,7 +120,7 @@ internal sealed class TransmitterForm : Form
         {
             Minimum = 0,
             Maximum = 47,
-            Value = 30,
+            Value = Math.Clamp(_appSettings.GainDb, 0, 47),
             Location = new Point(410, 114),
             Size = new Size(60, 23),
         };
@@ -118,14 +128,16 @@ internal sealed class TransmitterForm : Form
         _ampCheckBox = new CheckBox
         {
             Text = "Enable HackRF amp",
+            Checked = _appSettings.AmpEnabled,
             AutoSize = true,
-            Location = new Point(480, 116),
+            Location = new Point(20, 158),
         };
 
-        var callsignLabel = new Label { Text = "Callsign:", AutoSize = true, Location = new Point(20, 158) };
+        var callsignLabel = new Label { Text = "Callsign:", AutoSize = true, Location = new Point(20, 196) };
         _callsignTextBox = new TextBox
         {
-            Location = new Point(100, 154),
+            Text = _appSettings.Callsign ?? string.Empty,
+            Location = new Point(100, 192),
             Size = new Size(160, 23),
             MaxLength = 10,
         };
@@ -133,8 +145,9 @@ internal sealed class TransmitterForm : Form
         _testPatternCheckBox = new CheckBox
         {
             Text = "Use test pattern instead of webcam",
+            Checked = _appSettings.UseTestPattern,
             AutoSize = true,
-            Location = new Point(20, 196),
+            Location = new Point(280, 194),
         };
         _testPatternCheckBox.CheckedChanged += (_, _) => UpdateDeviceControls();
 
@@ -162,6 +175,27 @@ internal sealed class TransmitterForm : Form
             Location = new Point(260, 230),
         };
 
+        _previewBox = new PictureBox
+        {
+            Location = new Point(10, 22),
+            Size = new Size(390, 330),
+            SizeMode = PictureBoxSizeMode.Zoom,
+            BackColor = Color.Black,
+            BorderStyle = BorderStyle.FixedSingle,
+        };
+
+        _logTextBox = new TextBox
+        {
+            Location = new Point(16, 292),
+            Size = new Size(540, 248),
+            Multiline = true,
+            ScrollBars = ScrollBars.Vertical,
+            ReadOnly = true,
+        };
+
+        _previewTimer = new System.Windows.Forms.Timer { Interval = 100 };
+        _previewTimer.Tick += PreviewTimer_Tick;
+
         settingsGroup.Controls.Add(deviceLabel);
         settingsGroup.Controls.Add(_deviceComboBox);
         settingsGroup.Controls.Add(_refreshDevicesButton);
@@ -169,7 +203,7 @@ internal sealed class TransmitterForm : Form
         settingsGroup.Controls.Add(_presetComboBox);
         settingsGroup.Controls.Add(frequencyLabel);
         settingsGroup.Controls.Add(_frequencyUpDown);
-        settingsGroup.Controls.Add(mhzLabel1);
+        settingsGroup.Controls.Add(mhzLabel);
         settingsGroup.Controls.Add(bandwidthLabel);
         settingsGroup.Controls.Add(_bandwidthTrackBar);
         settingsGroup.Controls.Add(_bandwidthValueLabel);
@@ -183,48 +217,119 @@ internal sealed class TransmitterForm : Form
         settingsGroup.Controls.Add(_stopButton);
         settingsGroup.Controls.Add(_statusLabel);
 
-        _logTextBox = new TextBox
-        {
-            Location = new Point(16, 292),
-            Size = new Size(728, 248),
-            Multiline = true,
-            ScrollBars = ScrollBars.Vertical,
-            ReadOnly = true,
-        };
+        previewGroup.Controls.Add(_previewBox);
 
         Controls.Add(settingsGroup);
+        Controls.Add(previewGroup);
         Controls.Add(_logTextBox);
 
+        ApplySavedPreset();
         UpdateBandwidthLabel();
-        
-        // Select default preset if matches (e.g. 427.25)
-        foreach (var item in _presetComboBox.Items)
-        {
-            if (item is AtvChannel ch && ch.FrequencyMhz == _frequencyUpDown.Value)
-            {
-                _presetComboBox.SelectedItem = item;
-                break;
-            }
-        }
-        if (_presetComboBox.SelectedIndex == -1)
-            _presetComboBox.SelectedIndex = 0; // Custom
+        UpdateDeviceControls();
 
         Load += (_, _) => RefreshDevices();
-        FormClosing += (_, _) =>
+        FormClosing += TransmitterForm_FormClosing;
+    }
+
+    private AppSettings LoadSettings()
+    {
+        try
         {
-            if (_session is not null)
+            return AppSettings.Load();
+        }
+        catch (IOException ex)
+        {
+            MessageBox.Show(this, $"Failed to load narrowbeam.ini: {ex.Message}", "Settings Load Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return new AppSettings();
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            MessageBox.Show(this, $"Failed to load narrowbeam.ini: {ex.Message}", "Settings Load Error",
+                MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return new AppSettings();
+        }
+    }
+
+    private void SaveSettings()
+    {
+        _appSettings.FrequencyMhz = _frequencyUpDown.Value;
+        _appSettings.BandwidthMhz = GetBandwidthMHz();
+        _appSettings.GainDb = (int)_gainUpDown.Value;
+        _appSettings.AmpEnabled = _ampCheckBox.Checked;
+        _appSettings.Callsign = string.IsNullOrWhiteSpace(_callsignTextBox.Text) ? null : _callsignTextBox.Text.Trim();
+        _appSettings.UseTestPattern = _testPatternCheckBox.Checked;
+        _appSettings.LastDevice = _testPatternCheckBox.Checked ? null : _deviceComboBox.SelectedItem?.ToString();
+        _appSettings.LastPreset = _presetComboBox.SelectedItem is AtvChannel channel && channel.FrequencyMhz > 0
+            ? channel.Name
+            : "Custom";
+
+        _appSettings.Save();
+    }
+
+    private void ApplySavedPreset()
+    {
+        if (!string.IsNullOrWhiteSpace(_appSettings.LastPreset))
+        {
+            foreach (object item in _presetComboBox.Items)
             {
-                _session.Dispose();
-                _session = null;
+                if (item is AtvChannel channel && string.Equals(channel.Name, _appSettings.LastPreset, StringComparison.Ordinal))
+                {
+                    _presetComboBox.SelectedItem = item;
+                    return;
+                }
             }
-        };
+        }
+
+        foreach (object item in _presetComboBox.Items)
+        {
+            if (item is AtvChannel channel && channel.FrequencyMhz == _frequencyUpDown.Value)
+            {
+                _presetComboBox.SelectedItem = item;
+                return;
+            }
+        }
+
+        _presetComboBox.SelectedIndex = 0;
     }
 
     private void PresetChanged(object? sender, EventArgs e)
     {
-        if (_presetComboBox.SelectedItem is AtvChannel ch && ch.FrequencyMhz > 0)
+        if (_updatingPresetFromCode)
+            return;
+
+        if (_presetComboBox.SelectedItem is AtvChannel channel && channel.FrequencyMhz > 0)
         {
-            _frequencyUpDown.Value = ch.FrequencyMhz;
+            _updatingPresetFromCode = true;
+            try
+            {
+                _frequencyUpDown.Value = channel.FrequencyMhz;
+            }
+            finally
+            {
+                _updatingPresetFromCode = false;
+            }
+        }
+    }
+
+    private void FrequencyChanged(object? sender, EventArgs e)
+    {
+        if (_updatingPresetFromCode)
+            return;
+
+        if (_presetComboBox.SelectedItem is AtvChannel channel &&
+            channel.FrequencyMhz > 0 &&
+            channel.FrequencyMhz != _frequencyUpDown.Value)
+        {
+            _updatingPresetFromCode = true;
+            try
+            {
+                _presetComboBox.SelectedIndex = 0;
+            }
+            finally
+            {
+                _updatingPresetFromCode = false;
+            }
         }
     }
 
@@ -238,7 +343,15 @@ internal sealed class TransmitterForm : Form
 
             if (_deviceComboBox.Items.Count > 0)
             {
-                _deviceComboBox.SelectedIndex = 0;
+                int selectedIndex = 0;
+                if (!string.IsNullOrWhiteSpace(_appSettings.LastDevice))
+                {
+                    int foundIndex = _deviceComboBox.Items.IndexOf(_appSettings.LastDevice);
+                    if (foundIndex >= 0)
+                        selectedIndex = foundIndex;
+                }
+
+                _deviceComboBox.SelectedIndex = selectedIndex;
                 AppendLog($"Loaded {_deviceComboBox.Items.Count} video device(s).");
             }
             else
@@ -284,6 +397,8 @@ internal sealed class TransmitterForm : Form
 
             _session = new TransmitterSession(AppendLog);
             _session.Start(settings);
+            SaveSettings();
+            _previewTimer.Start();
 
             _startButton.Enabled = false;
             _stopButton.Enabled = true;
@@ -292,6 +407,7 @@ internal sealed class TransmitterForm : Form
         catch (Exception ex)
         {
             AppendLog($"Start failed: {ex.Message}");
+            _previewTimer.Stop();
             _session?.Dispose();
             _session = null;
             _startButton.Enabled = true;
@@ -304,8 +420,10 @@ internal sealed class TransmitterForm : Form
     {
         try
         {
+            _previewTimer.Stop();
             _session?.Dispose();
             _session = null;
+            SaveSettings();
             _startButton.Enabled = true;
             _stopButton.Enabled = false;
             _statusLabel.Text = "Status: Idle";
@@ -314,6 +432,42 @@ internal sealed class TransmitterForm : Form
         {
             AppendLog($"Stop failed: {ex.Message}");
             _statusLabel.Text = "Status: Error";
+        }
+    }
+
+    private void PreviewTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_session?.NtscSignal is null)
+            return;
+
+        Image? previousImage = _previewBox.Image;
+        _previewBox.Image = _session.NtscSignal.GetPreviewBitmap();
+        previousImage?.Dispose();
+    }
+
+    private void TransmitterForm_FormClosing(object? sender, FormClosingEventArgs e)
+    {
+        _previewTimer.Stop();
+
+        try
+        {
+            SaveSettings();
+        }
+        catch (IOException ex)
+        {
+            AppendLog($"Settings save failed: {ex.Message}");
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            AppendLog($"Settings save failed: {ex.Message}");
+        }
+
+        _previewBox.Image?.Dispose();
+
+        if (_session is not null)
+        {
+            _session.Dispose();
+            _session = null;
         }
     }
 
@@ -328,14 +482,10 @@ internal sealed class TransmitterForm : Form
         _logTextBox.AppendText($"[{DateTime.Now:HH:mm:ss}] {message}{Environment.NewLine}");
     }
 
-    private double GetBandwidthMHz()
-    {
-        return _bandwidthTrackBar.Value / 2.0;
-    }
+    private double GetBandwidthMHz() => _bandwidthTrackBar.Value / 2.0;
 
     private void UpdateBandwidthLabel()
     {
-        double bw = GetBandwidthMHz();
-        _bandwidthValueLabel.Text = $"{bw:F1} MHz";
+        _bandwidthValueLabel.Text = $"{GetBandwidthMHz():F1} MHz";
     }
 }

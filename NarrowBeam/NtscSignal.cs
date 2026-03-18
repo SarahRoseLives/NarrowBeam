@@ -1,4 +1,7 @@
 using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 namespace NarrowBeam;
@@ -10,16 +13,15 @@ namespace NarrowBeam;
 /// </summary>
 internal sealed class NtscSignal
 {
-    private const double FrameRate       = 30_000.0 / 1_001.0;
-    private const double Fsc             = 3_579_545.4545;
-    private const int    LinesPerFrame   = 525;
-    private const int    FilterOrder     = 4; // IIR order (Butterworth)
+    private const double FrameRate = 30_000.0 / 1_001.0;
+    private const double Fsc = 3_579_545.4545;
+    private const int LinesPerFrame = 525;
 
-    private const double LevelSync     = -40.0;
-    private const double LevelBlanking =   0.0;
-    private const double LevelBlack    =   7.5;
-    private const double LevelWhite    = 100.0;
-    private const double BurstAmp      =  20.0;
+    private const double LevelSync = -40.0;
+    private const double LevelBlanking = 0.0;
+    private const double LevelBlack = 7.5;
+    private const double LevelWhite = 100.0;
+    private const double BurstAmp = 20.0;
 
     private static readonly (byte R, byte G, byte B)[] BarRgb =
     {
@@ -32,55 +34,46 @@ internal sealed class NtscSignal
         (  0,   0, 192),
     };
 
-    public const int FrameWidth  = 540;
+    public const int FrameWidth = 540;
     public const int FrameHeight = 480;
 
-    private readonly double   _sampleRate;
-    private readonly int      _lineSamples;
-    private readonly int      _hSyncSamples;
-    private readonly int      _vSyncPulseSamples;
-    private readonly int      _eqPulseSamples;
-    private readonly int      _burstStartSamples;
-    private readonly int      _burstEndSamples;
-    private readonly int      _activeStartSamples;
-    private readonly int      _activeSamples;
-    private readonly double   _phaseInc;
+    private readonly int _lineSamples;
+    private readonly int _hSyncSamples;
+    private readonly int _vSyncPulseSamples;
+    private readonly int _eqPulseSamples;
+    private readonly int _burstStartSamples;
+    private readonly int _burstEndSamples;
+    private readonly int _activeStartSamples;
+    private readonly int _activeSamples;
+    private readonly double _phaseInc;
 
-    private readonly byte[]   _rawFrame;
+    private readonly byte[] _rawFrame;
     private volatile double[] _frontBuffer;
-    private double[]          _backBuffer;
+    private double[] _backBuffer;
     private readonly LowPassFilter? _lpf;
 
-    private readonly ReaderWriterLockSlim _rawLock   = new();
-    private readonly object           _swapLock  = new();
+    private readonly ReaderWriterLockSlim _rawLock = new();
+    private readonly ReaderWriterLockSlim _frameLock = new();
 
-    public byte[]   RawFrameBuffer => _rawFrame;
-    public double[] FrameBuffer    => _frontBuffer;
+    public byte[] RawFrameBuffer => _rawFrame;
+    public double[] FrameBuffer => _frontBuffer;
 
-    /// <param name="sampleRate">HackRF sample rate in Hz (e.g. 8_000_000).</param>
-    /// <param name="bandwidthHz">
-    ///   RF bandwidth in Hz. The composite video is low-pass filtered at
-    ///   bandwidthHz/2 so the total RF occupancy equals bandwidthHz.
-    ///   Pass 0 or null to skip filtering (full ~6 MHz NTSC bandwidth).
-    /// </param>
     public NtscSignal(double sampleRate, double bandwidthHz = 0)
     {
-        _sampleRate = sampleRate;
-
         double lineDuration = 1.0 / (FrameRate * LinesPerFrame);
-        _lineSamples        = (int)(lineDuration * sampleRate);
-        _hSyncSamples       = (int)(4.7e-6  * sampleRate);
-        _vSyncPulseSamples  = (int)(27.1e-6 * sampleRate);
-        _eqPulseSamples     = (int)(2.3e-6  * sampleRate);
-        _burstStartSamples  = (int)(5.6e-6  * sampleRate);
-        _burstEndSamples    = _burstStartSamples + (int)(2.5e-6 * sampleRate);
+        _lineSamples = (int)(lineDuration * sampleRate);
+        _hSyncSamples = (int)(4.7e-6 * sampleRate);
+        _vSyncPulseSamples = (int)(27.1e-6 * sampleRate);
+        _eqPulseSamples = (int)(2.3e-6 * sampleRate);
+        _burstStartSamples = (int)(5.6e-6 * sampleRate);
+        _burstEndSamples = _burstStartSamples + (int)(2.5e-6 * sampleRate);
         _activeStartSamples = (int)(10.7e-6 * sampleRate);
-        _activeSamples      = (int)(52.6e-6 * sampleRate);
-        _phaseInc           = 2.0 * Math.PI * Fsc / sampleRate;
+        _activeSamples = (int)(52.6e-6 * sampleRate);
+        _phaseInc = 2.0 * Math.PI * Fsc / sampleRate;
 
-        _rawFrame    = new byte[FrameWidth * FrameHeight * 3];
+        _rawFrame = new byte[FrameWidth * FrameHeight * 3];
         _frontBuffer = new double[_lineSamples * LinesPerFrame];
-        _backBuffer  = new double[_lineSamples * LinesPerFrame];
+        _backBuffer = new double[_lineSamples * LinesPerFrame];
 
         if (bandwidthHz > 0)
             _lpf = new LowPassFilter(bandwidthHz / 2.0, sampleRate);
@@ -89,33 +82,15 @@ internal sealed class NtscSignal
     public static double IreToAmplitude(double ire) =>
         ((ire - 100.0) / -140.0) * (1.0 - 0.125) + 0.125;
 
-    // ── Locking ───────────────────────────────────────────────────────────────
-    public void LockRaw()      => _rawLock.EnterWriteLock();
-    public void UnlockRaw()    => _rawLock.ExitWriteLock();
-    public void RLockRaw()     => _rawLock.EnterReadLock();
-    public void RUnlockRaw()   => _rawLock.ExitReadLock();
-    
-    // Frame locking is no longer needed for generation, only for swapping.
-    // We keep these methods to satisfy existing callers but they will be no-ops or minimal.
-    // Actually, TransferCallback uses RLockFrame to protect against reading while writing.
-    // With double buffering, we just need to ensure the pointer _frontBuffer doesn't change WHILE we are reading it?
-    // No, atomic reference swap is fine. But we are reading the ARRAY content.
-    // If we swap the array, the old array instance is still valid (it becomes the backbuffer).
-    // BUT the writer (GenerateFullFrame) will immediately start writing to the NEW backbuffer (which was the OLD frontbuffer).
-    // So if TransferCallback is still reading the OLD frontbuffer (now backbuffer), we have a race.
-    // So we DO need a lock. But the writer only holds the lock during the SWAP, not during GENERATION.
-    
-    public void LockFrame()    { /* No-op, generation happens on backbuffer */ }
-    public void UnlockFrame()  { /* No-op */ }
-    
-    // RLockFrame is used by TransferCallback. It should effectively "pin" the current buffer.
-    // But since we want to avoid blocking, maybe we can just use a shared lock that is only taken exclusively during swap.
-    private readonly ReaderWriterLockSlim _swapRwLock = new();
+    public void LockRaw() => _rawLock.EnterWriteLock();
+    public void UnlockRaw() => _rawLock.ExitWriteLock();
+    public void RLockRaw() => _rawLock.EnterReadLock();
+    public void RUnlockRaw() => _rawLock.ExitReadLock();
+    public void LockFrame() => _frameLock.EnterWriteLock();
+    public void UnlockFrame() => _frameLock.ExitWriteLock();
+    public void RLockFrame() => _frameLock.EnterReadLock();
+    public void RUnlockFrame() => _frameLock.ExitReadLock();
 
-    public void RLockFrame()   => _swapRwLock.EnterReadLock();
-    public void RUnlockFrame() => _swapRwLock.ExitReadLock();
-
-    // ── Test pattern ─────────────────────────────────────────────────────────
     public void FillColorBars()
     {
         int barWidth = FrameWidth / 7;
@@ -124,19 +99,52 @@ internal sealed class NtscSignal
         {
             int b = Math.Min(x / barWidth, 6);
             int i = (y * FrameWidth + x) * 3;
-            _rawFrame[i]     = BarRgb[b].R;
+            _rawFrame[i] = BarRgb[b].R;
             _rawFrame[i + 1] = BarRgb[b].G;
             _rawFrame[i + 2] = BarRgb[b].B;
         }
     }
 
-    // ── Frame generation ─────────────────────────────────────────────────────
+    public Bitmap GetPreviewBitmap()
+    {
+        var bitmap = new Bitmap(FrameWidth, FrameHeight, PixelFormat.Format24bppRgb);
+        var rect = new Rectangle(0, 0, FrameWidth, FrameHeight);
+        BitmapData bitmapData = bitmap.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+
+        int rowBytes = FrameWidth * 3;
+        byte[] rowBuffer = new byte[rowBytes];
+
+        RLockRaw();
+        try
+        {
+            for (int y = 0; y < FrameHeight; y++)
+            {
+                int srcOffset = y * rowBytes;
+                for (int x = 0; x < FrameWidth; x++)
+                {
+                    int src = srcOffset + (x * 3);
+                    int dst = x * 3;
+                    rowBuffer[dst] = _rawFrame[src + 2];
+                    rowBuffer[dst + 1] = _rawFrame[src + 1];
+                    rowBuffer[dst + 2] = _rawFrame[src];
+                }
+
+                IntPtr rowPtr = IntPtr.Add(bitmapData.Scan0, y * bitmapData.Stride);
+                Marshal.Copy(rowBuffer, 0, rowPtr, rowBytes);
+            }
+        }
+        finally
+        {
+            RUnlockRaw();
+            bitmap.UnlockBits(bitmapData);
+        }
+
+        return bitmap;
+    }
+
     public void GenerateFullFrame()
     {
         double subPhase = 0.0;
-        
-        // We write to _backBuffer. No lock needed yet as we are the only writer.
-        // (Assuming GenerateFullFrame is not called concurrently, which WebcamCapture ensures).
 
         for (int line = 1; line <= LinesPerFrame; line++)
         {
@@ -156,6 +164,7 @@ internal sealed class NtscSignal
                         GetPixelYiq(line, s, out _, out double iVal, out double qVal);
                         lineBuffer[s] += iVal * Math.Cos(subPhase) + qVal * Math.Sin(subPhase);
                     }
+
                     subPhase += _phaseInc;
                 }
             }
@@ -168,11 +177,9 @@ internal sealed class NtscSignal
             Array.Copy(lineBuffer, 0, _backBuffer, offset, _lineSamples);
         }
 
-        // Apply bandwidth-limiting LPF to the back buffer if configured
         _lpf?.Apply(_backBuffer, 0, _backBuffer.Length);
 
-        // Swap buffers
-        _swapRwLock.EnterWriteLock();
+        _frameLock.EnterWriteLock();
         try
         {
             double[] temp = _frontBuffer;
@@ -181,25 +188,24 @@ internal sealed class NtscSignal
         }
         finally
         {
-            _swapRwLock.ExitWriteLock();
+            _frameLock.ExitWriteLock();
         }
     }
 
-    // ─────────────────────────────────────────────────────────────────────────
     private double[] GenerateLumaLine(int line)
     {
         var buf = new double[_lineSamples];
         Array.Fill(buf, LevelBlanking);
 
         int lineInField = line > LinesPerFrame / 2 ? line - LinesPerFrame / 2 : line;
-        bool isVbi      = lineInField <= 21;
-        int  halfLine   = _lineSamples / 2;
+        bool isVbi = lineInField <= 21;
+        int halfLine = _lineSamples / 2;
 
         if ((lineInField >= 1 && lineInField <= 3) || (lineInField >= 7 && lineInField <= 9))
         {
             for (int s = 0; s < _eqPulseSamples; s++)
             {
-                buf[s]            = LevelSync;
+                buf[s] = LevelSync;
                 buf[halfLine + s] = LevelSync;
             }
             return buf;
@@ -209,7 +215,7 @@ internal sealed class NtscSignal
         {
             for (int s = 0; s < _vSyncPulseSamples; s++)
             {
-                buf[s]            = LevelSync;
+                buf[s] = LevelSync;
                 buf[halfLine + s] = LevelSync;
             }
             return buf;
@@ -239,7 +245,9 @@ internal sealed class NtscSignal
             videoLine = (line - 285) * 2 + 1;
         else
         {
-            y = LevelBlack; iVal = 0; qVal = 0;
+            y = LevelBlack;
+            iVal = 0;
+            qVal = 0;
             return;
         }
 
@@ -248,21 +256,22 @@ internal sealed class NtscSignal
 
         if (videoLine < 0 || videoLine >= FrameHeight || pixelX < 0 || pixelX >= FrameWidth)
         {
-            y = LevelBlack; iVal = 0; qVal = 0;
+            y = LevelBlack;
+            iVal = 0;
+            qVal = 0;
             return;
         }
 
-        // Caller holds RLockRaw or LockRaw already when called from GenerateFullFrame
         int idx = (videoLine * FrameWidth + pixelX) * 3;
         double r = _rawFrame[idx];
         double g = _rawFrame[idx + 1];
         double b = _rawFrame[idx + 2];
 
-        double yRaw =  0.299 * r + 0.587 * g + 0.114 * b;
-        double iRaw =  0.596 * r - 0.274 * g - 0.322 * b;
-        double qRaw =  0.211 * r - 0.523 * g + 0.312 * b;
+        double yRaw = 0.299 * r + 0.587 * g + 0.114 * b;
+        double iRaw = 0.596 * r - 0.274 * g - 0.322 * b;
+        double qRaw = 0.211 * r - 0.523 * g + 0.312 * b;
 
-        y    = LevelBlack + yRaw / 255.0 * (LevelWhite - LevelBlack);
+        y = LevelBlack + yRaw / 255.0 * (LevelWhite - LevelBlack);
         iVal = iRaw / 255.0 * (LevelWhite - LevelBlack);
         qVal = qRaw / 255.0 * (LevelWhite - LevelBlack);
     }
