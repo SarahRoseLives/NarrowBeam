@@ -63,6 +63,20 @@ internal static class HackRf
     public static extern int hackrf_stop_tx(IntPtr device);
 
     [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int hackrf_start_rx(IntPtr device, TransferCallback callback, IntPtr rxCtx);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int hackrf_stop_rx(IntPtr device);
+
+    /// <summary>LNA gain: 0–40 dB in 8 dB steps.</summary>
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int hackrf_set_lna_gain(IntPtr device, uint value);
+
+    /// <summary>VGA (baseband) gain: 0–62 dB in 2 dB steps.</summary>
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
+    public static extern int hackrf_set_vga_gain(IntPtr device, uint value);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.Cdecl)]
     public static extern int hackrf_is_streaming(IntPtr device);
 
     public static void Check(int result, string operation)

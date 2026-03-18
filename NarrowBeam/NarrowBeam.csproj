@@ -3,9 +3,11 @@
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
 
@@ -15,6 +17,7 @@
     <None Include="..\hackrf.dll"         CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\libusb-1.0.dll"     CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\pthreadVC2.dll"     CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\rtlsdr.dll"         CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
