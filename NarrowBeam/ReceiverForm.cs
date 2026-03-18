@@ -19,6 +19,18 @@ internal sealed class ReceiverForm : Form
     private readonly PictureBox _videoBox;
     private readonly System.Windows.Forms.Timer _videoTimer;
 
+    // Tuning sliders
+    private readonly TrackBar _sharpnessSlider;
+    private readonly TrackBar _syncThreshSlider;
+    private readonly TrackBar _hPosSlider;
+    private readonly TrackBar _hSizeSlider;
+    private readonly TrackBar _brightnessSlider;
+    private readonly Label _sharpnessVal;
+    private readonly Label _syncThreshVal;
+    private readonly Label _hPosVal;
+    private readonly Label _hSizeVal;
+    private readonly Label _brightnessVal;
+
     private volatile bool _running;
     private Thread? _rxThread;
     private AmVideoDemodulator? _demodulator;
@@ -29,7 +41,7 @@ internal sealed class ReceiverForm : Form
     {
         Text = "NarrowBeam - Receiver";
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(1000, 480);
+        ClientSize = new Size(1000, 590);
 
         var settingsGroup = new GroupBox
         {
@@ -130,13 +142,13 @@ internal sealed class ReceiverForm : Form
         {
             Text = "Live Video",
             Location = new Point(570, 16),
-            Size = new Size(410, 360),
+            Size = new Size(410, 557),
         };
 
         _videoBox = new PictureBox
         {
             Location = new Point(10, 22),
-            Size = new Size(390, 330),
+            Size = new Size(390, 525),
             SizeMode = PictureBoxSizeMode.Zoom,
             BackColor = Color.Black,
             BorderStyle = BorderStyle.FixedSingle,
@@ -147,11 +159,97 @@ internal sealed class ReceiverForm : Form
         Controls.Add(settingsGroup);
         Controls.Add(videoGroup);
 
+        // ── Tuning sliders ────────────────────────────────────────────────────
+        var tuningGroup = new GroupBox
+        {
+            Text = "Demodulator Tuning",
+            Location = new Point(16, 188),
+            Size = new Size(540, 385),
+        };
+
+        (_sharpnessSlider, _sharpnessVal) = AddSlider(tuningGroup, "Sharpness",  0,  0, 100, 85);
+        (_syncThreshSlider, _syncThreshVal) = AddSlider(tuningGroup, "Sync Thresh", 1,  5,  40, 20);
+        (_hPosSlider,      _hPosVal)      = AddSlider(tuningGroup, "H-Position", 2, 15,  40, 26);
+        (_hSizeSlider,     _hSizeVal)     = AddSlider(tuningGroup, "H-Size",     3, 50,  90, 74);
+        (_brightnessSlider, _brightnessVal) = AddSlider(tuningGroup, "Brightness", 4, 10,  50, 28);
+
+        _sharpnessSlider.ValueChanged  += (_, _) => ApplyTuning();
+        _syncThreshSlider.ValueChanged += (_, _) => ApplyTuning();
+        _hPosSlider.ValueChanged       += (_, _) => ApplyTuning();
+        _hSizeSlider.ValueChanged      += (_, _) => ApplyTuning();
+        _brightnessSlider.ValueChanged += (_, _) => ApplyTuning();
+
+        var resetButton = new Button
+        {
+            Text = "Reset Defaults",
+            Location = new Point(200, 350),
+            Size = new Size(130, 27),
+        };
+        resetButton.Click += (_, _) =>
+        {
+            _sharpnessSlider.Value  = 85;
+            _syncThreshSlider.Value = 20;
+            _hPosSlider.Value       = 26;
+            _hSizeSlider.Value      = 74;
+            _brightnessSlider.Value = 28;
+        };
+        tuningGroup.Controls.Add(resetButton);
+
+        Controls.Add(tuningGroup);
+
         _videoTimer = new System.Windows.Forms.Timer { Interval = 33 };
         _videoTimer.Tick += VideoTimer_Tick;
 
         _presetComboBox.SelectedIndex = 0;
         RefreshDevices();
+    }
+
+    private static (TrackBar slider, Label valueLabel) AddSlider(
+        GroupBox parent, string name, int row, int min, int max, int def)
+    {
+        int y = 28 + row * 65;
+
+        parent.Controls.Add(new Label
+        {
+            Text = name,
+            AutoSize = true,
+            Location = new Point(12, y + 4),
+            Font = new Font("Segoe UI", 9, FontStyle.Bold),
+        });
+
+        var slider = new TrackBar
+        {
+            Minimum   = min,
+            Maximum   = max,
+            Value     = def,
+            TickStyle = TickStyle.None,
+            Location  = new Point(110, y),
+            Size      = new Size(340, 35),
+        };
+
+        var valLabel = new Label
+        {
+            Text      = def.ToString(),
+            AutoSize  = true,
+            Location  = new Point(460, y + 4),
+            Width     = 50,
+        };
+
+        slider.ValueChanged += (_, _) => valLabel.Text = slider.Value.ToString();
+
+        parent.Controls.Add(slider);
+        parent.Controls.Add(valLabel);
+        return (slider, valLabel);
+    }
+
+    private void ApplyTuning()
+    {
+        if (_demodulator == null) return;
+        _demodulator.LpfAlpha        = _sharpnessSlider.Value  / 100.0;
+        _demodulator.SyncThreshold   = _syncThreshSlider.Value  / 100.0;
+        _demodulator.ActiveStart     = _hPosSlider.Value        / 100.0;
+        _demodulator.ActiveWidth     = _hSizeSlider.Value       / 100.0;
+        _demodulator.BlackLevelOffset = _brightnessSlider.Value / 100.0;
     }
 
     private void RefreshDevices()
@@ -227,6 +325,7 @@ internal sealed class ReceiverForm : Form
             if (r < 0) throw new Exception("Failed to reset buffer");
 
             _demodulator = new AmVideoDemodulator(2_400_000);
+            ApplyTuning();
             _running = true;
 
             // Important: rtlsdr_read_async blocks, so run in thread

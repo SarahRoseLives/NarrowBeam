@@ -16,9 +16,10 @@ internal sealed class AmVideoDemodulator
     private const int FrameHeight = 480;
     
     // NTSC timing (approximate for robust locking)
-    private const double DefaultSamplesPerLine = 2000000.0 / 15734.0; // ~127 samples at 2MSPS
-    
+    private readonly double _nominalSamplesPerLine;
+
     private readonly double _sampleRate;
+    // PLL period — starts at nominal NTSC line duration, adapts to actual signal
     private double _samplesPerLine;
     
     // State
@@ -43,7 +44,8 @@ internal sealed class AmVideoDemodulator
     public AmVideoDemodulator(double sampleRate)
     {
         _sampleRate = sampleRate;
-        _samplesPerLine = sampleRate / 15734.264; // NTSC Line Rate
+        _nominalSamplesPerLine = sampleRate / 15734.264; // NTSC line rate
+        _samplesPerLine = _nominalSamplesPerLine;
         
         _frameBuffer = new byte[FrameWidth * FrameHeight * 3];
         _displayBuffer = new byte[FrameWidth * FrameHeight * 3];
@@ -55,11 +57,22 @@ internal sealed class AmVideoDemodulator
     private double _dcQ = 0;
     private const double DcAlpha = 0.0001;
 
-    // Post-demodulation low-pass filter state (2-stage IIR, ~500 kHz @ 2.4 MSPS)
-    // Cuts noise above video luma bandwidth without affecting sync detection.
+    // Post-demodulation low-pass filter (single-stage IIR, ~1 MHz @ 2.4 MSPS).
+    // Light smoothing to reduce shot noise without blurring horizontal detail.
+    // Two-stage was ~383 kHz — too tight, causing horizontal blur.
     private double _lpf1;
-    private double _lpf2;
-    private const double LpfAlpha = 0.75;
+
+    // ── Tunable parameters (adjustable from UI sliders) ──────────────────────
+    /// <summary>LPF smoothing factor: 0.5 (smooth/noisy) → 1.0 (sharp/grainy).</summary>
+    public double LpfAlpha { get; set; } = 0.85;
+    /// <summary>Sync detection threshold as fraction of envelope (0.05–0.40).</summary>
+    public double SyncThreshold { get; set; } = 0.20;
+    /// <summary>Active video start as fraction of line period (back-porch end).</summary>
+    public double ActiveStart { get; set; } = 0.26;
+    /// <summary>Active video width as fraction of line period.</summary>
+    public double ActiveWidth { get; set; } = 0.74;
+    /// <summary>Black level offset as fraction of envelope range.</summary>
+    public double BlackLevelOffset { get; set; } = 0.28;
 
     // Tracks the last horizontal pixel drawn on the current line for gap-filling.
     private int _lastPx = -1;
@@ -93,9 +106,10 @@ internal sealed class AmVideoDemodulator
         const double AgcAttack = 0.001;
         const double AgcDecay  = 0.000005;
 
-        // At 2.4 MSPS, NTSC H-sync is ~11 samples wide, V-sync serrations ~65 samples.
-        // We classify pulses by width on the FALLING edge, so the rising edge can
-        // unconditionally reset _x (hard sync) for solid horizontal lock.
+        // PLL horizontal sync: _x is a phase accumulator.  On each H-sync rising
+        // edge the PLL steers _x toward 0 (phase) and _samplesPerLine toward the
+        // actual line period (frequency).  Pulse-width classification still happens
+        // on the falling edge so equalizing/V-sync pulses don't perturb the PLL.
 
         for (int i = 0; i < samples; i++)
         {
@@ -115,11 +129,10 @@ internal sealed class AmVideoDemodulator
             double mag = (absI > absQ ? absI : absQ) + 0.4 * (absI > absQ ? absQ : absI);
 
             // ── 2. Post-demod low-pass filter ────────────────────────────────
-            // 2-stage IIR (~530 kHz cutoff at 2.4 MSPS). Applied to the video
-            // signal only — sync detection uses the raw magnitude so edges stay sharp.
-            _lpf1 = _lpf1 + LpfAlpha * (mag  - _lpf1);
-            _lpf2 = _lpf2 + LpfAlpha * (_lpf1 - _lpf2);
-            double filteredMag = _lpf2;
+            // Single-stage IIR. LpfAlpha is tunable (0.5=smooth → 1.0=sharp).
+            // Sync detection uses raw magnitude so edges stay sharp.
+            _lpf1 = _lpf1 + LpfAlpha * (mag - _lpf1);
+            double filteredMag = _lpf1;
 
             // ── 3. AGC (tracks on raw magnitude to catch sync tips accurately) ─
             if (mag > _smoothedMax)
@@ -137,17 +150,29 @@ internal sealed class AmVideoDemodulator
 
             // ── 4. Sync detection (on raw mag — needs sharp edges) ───────────
             // NTSC negative modulation: sync tips are at MAX RF level.
-            bool isSyncSample = mag > (_smoothedMax - range * 0.20);
+            bool isSyncSample = mag > (_smoothedMax - range * SyncThreshold);
 
             if (isSyncSample && !_inSyncPulse)
             {
                 // ── Rising edge of sync ──────────────────────────────────────
                 _inSyncPulse = true;
                 _pixelCounter = 0;
-                _lastPx = -1; // reset gap-fill tracker at start of each new line
+                _lastPx = -1;
 
-                // Hard-sync: reset horizontal counter unconditionally.
-                _x = 0;
+                // H-sync PLL: steer phase and frequency toward lock.
+                // _x should be ~0 at each rising edge when locked.
+                // Kp corrects phase immediately; Kf drifts the period slowly.
+                const double Kp = 0.4;
+                const double Kf = 0.0005;
+                double phaseError = _x;
+                _x        -= Kp * phaseError;
+                _samplesPerLine -= Kf * phaseError;
+
+                // Clamp period to ±15% of nominal to prevent runaway
+                double lo = _nominalSamplesPerLine * 0.85;
+                double hi = _nominalSamplesPerLine * 1.15;
+                if (_samplesPerLine < lo) _samplesPerLine = lo;
+                if (_samplesPerLine > hi) _samplesPerLine = hi;
             }
             else if (!isSyncSample && _inSyncPulse)
             {
@@ -203,8 +228,8 @@ internal sealed class AmVideoDemodulator
             // ── 5. Draw pixel (with gap-filling) ─────────────────────────────
             if (!_inSyncPulse && _y >= 0 && _y < FrameHeight)
             {
-                double activeStart = _samplesPerLine * 0.26;
-                double activeWidth = _samplesPerLine * 0.74;
+                double activeStart = _samplesPerLine * ActiveStart;
+                double activeWidth = _samplesPerLine * ActiveWidth;
 
                 if (_x >= activeStart)
                 {
@@ -213,7 +238,7 @@ internal sealed class AmVideoDemodulator
                     if (px >= 0 && px < FrameWidth)
                     {
                         // NTSC levels (negative modulation)
-                        double blackLevel = _smoothedMax - range * 0.28;
+                        double blackLevel = _smoothedMax - range * BlackLevelOffset;
                         double whiteLevel = _smoothedMin + range * 0.05;
                         double videoRange = blackLevel - whiteLevel;
                         if (videoRange < 1.0) videoRange = 1.0;
@@ -242,11 +267,12 @@ internal sealed class AmVideoDemodulator
                 }
             }
 
-            // ── 6. Advance horizontal counter ────────────────────────────────
+            // ── 6. Advance horizontal counter (PLL phase accumulator) ────────
             _x++;
 
-            // Horizontal flywheel: if no H-sync arrives within 1.5 line periods, wrap.
-            if (_x > _samplesPerLine * 1.5)
+            // Horizontal flywheel: fires only if no H-sync arrives within one
+            // full line period. With PLL locked this should never trigger.
+            if (_x > _samplesPerLine * 1.1)
             {
                 _x = 0;
                 _y++;
