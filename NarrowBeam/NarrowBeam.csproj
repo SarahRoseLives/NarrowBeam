@@ -1,0 +1,20 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+
+  <!-- Copy native HackRF DLLs from repo root to output directory -->
+  <ItemGroup>
+    <None Include="..\ffmpeg.exe"          CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\hackrf.dll"         CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\libusb-1.0.dll"     CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\pthreadVC2.dll"     CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
