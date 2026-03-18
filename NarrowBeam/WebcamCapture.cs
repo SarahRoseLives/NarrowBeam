@@ -13,7 +13,7 @@ internal sealed class WebcamCapture : IDisposable
     private readonly Action<string>? _log;
     private volatile bool _running = true;
 
-    public WebcamCapture(NtscSignal ntsc, string? deviceName, Action<string>? log = null)
+    public WebcamCapture(NtscSignal ntsc, string? deviceName, string? callsign, Action<string>? log = null)
     {
         _ntsc = ntsc;
         _log = log;
@@ -23,6 +23,15 @@ internal sealed class WebcamCapture : IDisposable
             : deviceName;
 
         string vfArg = $"setrange=full,scale={NtscSignal.FrameWidth}:{NtscSignal.FrameHeight},fps=30000/1001";
+        if (!string.IsNullOrWhiteSpace(callsign))
+        {
+            // Escape special characters for drawtext
+            string escapedCallsign = callsign.Replace(":", "\\:").Replace("'", "\\'");
+            // Use Arial font (standard on Windows)
+            string fontPath = "C\\:/Windows/Fonts/arial.ttf";
+            vfArg += $",drawbox=x=0:y=ih-40:w=iw:h=40:color=black@0.6:t=fill,drawtext=fontfile='{fontPath}':text='{escapedCallsign}':x=10:y=h-35:fontcolor=white:fontsize=32:borderw=2:bordercolor=black";
+        }
+
         string arguments = string.Join(" ",
             "-hide_banner -loglevel warning",
             "-f dshow",

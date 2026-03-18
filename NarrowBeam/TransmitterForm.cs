@@ -13,6 +13,7 @@ internal sealed class TransmitterForm : Form
     private readonly Label _bandwidthValueLabel;
     private readonly NumericUpDown _gainUpDown;
     private readonly CheckBox _ampCheckBox;
+    private readonly TextBox _callsignTextBox;
     private readonly CheckBox _testPatternCheckBox;
     private readonly Button _startButton;
     private readonly Button _stopButton;
@@ -25,13 +26,13 @@ internal sealed class TransmitterForm : Form
     {
         Text = "NarrowBeam - Transmitter";
         StartPosition = FormStartPosition.CenterScreen;
-        ClientSize = new Size(760, 520);
+        ClientSize = new Size(760, 560);
 
         var settingsGroup = new GroupBox
         {
             Text = "Transmitter Settings",
             Location = new Point(16, 16),
-            Size = new Size(728, 220),
+            Size = new Size(728, 260),
         };
 
         var deviceLabel = new Label { Text = "Camera:", AutoSize = true, Location = new Point(20, 34) };
@@ -102,18 +103,26 @@ internal sealed class TransmitterForm : Form
             Location = new Point(220, 116),
         };
 
+        var callsignLabel = new Label { Text = "Callsign:", AutoSize = true, Location = new Point(20, 158) };
+        _callsignTextBox = new TextBox
+        {
+            Location = new Point(100, 154),
+            Size = new Size(160, 23),
+            MaxLength = 10,
+        };
+
         _testPatternCheckBox = new CheckBox
         {
             Text = "Use test pattern instead of webcam",
             AutoSize = true,
-            Location = new Point(20, 156),
+            Location = new Point(20, 196),
         };
         _testPatternCheckBox.CheckedChanged += (_, _) => UpdateDeviceControls();
 
         _startButton = new Button
         {
             Text = "Start",
-            Location = new Point(20, 184),
+            Location = new Point(20, 224),
             Size = new Size(100, 28),
         };
         _startButton.Click += StartButton_Click;
@@ -121,7 +130,7 @@ internal sealed class TransmitterForm : Form
         _stopButton = new Button
         {
             Text = "Stop",
-            Location = new Point(132, 184),
+            Location = new Point(132, 224),
             Size = new Size(100, 28),
             Enabled = false,
         };
@@ -131,7 +140,7 @@ internal sealed class TransmitterForm : Form
         {
             Text = "Status: Idle",
             AutoSize = true,
-            Location = new Point(260, 190),
+            Location = new Point(260, 230),
         };
 
         settingsGroup.Controls.Add(deviceLabel);
@@ -146,6 +155,8 @@ internal sealed class TransmitterForm : Form
         settingsGroup.Controls.Add(gainLabel);
         settingsGroup.Controls.Add(_gainUpDown);
         settingsGroup.Controls.Add(_ampCheckBox);
+        settingsGroup.Controls.Add(callsignLabel);
+        settingsGroup.Controls.Add(_callsignTextBox);
         settingsGroup.Controls.Add(_testPatternCheckBox);
         settingsGroup.Controls.Add(_startButton);
         settingsGroup.Controls.Add(_stopButton);
@@ -153,7 +164,7 @@ internal sealed class TransmitterForm : Form
 
         _logTextBox = new TextBox
         {
-            Location = new Point(16, 252),
+            Location = new Point(16, 292),
             Size = new Size(728, 248),
             Multiline = true,
             ScrollBars = ScrollBars.Vertical,
@@ -224,6 +235,7 @@ internal sealed class TransmitterForm : Form
                 BandwidthMhz = GetBandwidthMHz(),
                 GainDb = (int)_gainUpDown.Value,
                 AmpEnabled = _ampCheckBox.Checked,
+                Callsign = _callsignTextBox.Text.Trim(),
                 UseTestPattern = _testPatternCheckBox.Checked,
                 DeviceName = _testPatternCheckBox.Checked ? null : _deviceComboBox.SelectedItem?.ToString(),
             };

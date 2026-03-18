@@ -33,7 +33,7 @@ internal sealed class TransmitterSession : IDisposable
         _ntsc.GenerateFullFrame();
 
         if (!settings.UseTestPattern)
-            _webcam = new WebcamCapture(_ntsc, settings.DeviceName, _log);
+            _webcam = new WebcamCapture(_ntsc, settings.DeviceName, settings.Callsign, _log);
 
         HackRf.Check(HackRf.hackrf_init(), "hackrf_init");
         _hackRfInitialised = true;
