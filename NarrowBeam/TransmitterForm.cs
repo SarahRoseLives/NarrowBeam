@@ -8,6 +8,7 @@ internal sealed class TransmitterForm : Form
 {
     private readonly ComboBox _deviceComboBox;
     private readonly Button _refreshDevicesButton;
+    private readonly ComboBox _presetComboBox;
     private readonly NumericUpDown _frequencyUpDown;
     private readonly TrackBar _bandwidthTrackBar;
     private readonly Label _bandwidthValueLabel;
@@ -51,7 +52,20 @@ internal sealed class TransmitterForm : Form
         };
         _refreshDevicesButton.Click += (_, _) => RefreshDevices();
 
-        var frequencyLabel = new Label { Text = "Frequency:", AutoSize = true, Location = new Point(20, 76) };
+        var presetLabel = new Label { Text = "Preset:", AutoSize = true, Location = new Point(20, 76) };
+        _presetComboBox = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Location = new Point(100, 72),
+            Size = new Size(160, 23),
+        };
+        _presetComboBox.Items.Add(new AtvChannel("Custom", 0)); // Placeholder for manual
+        foreach (var ch in AtvChannels.All)
+            _presetComboBox.Items.Add(ch);
+        _presetComboBox.DisplayMember = "Name";
+        _presetComboBox.SelectedIndexChanged += PresetChanged;
+
+        var frequencyLabel = new Label { Text = "Frequency:", AutoSize = true, Location = new Point(280, 76) };
         _frequencyUpDown = new NumericUpDown
         {
             DecimalPlaces = 3,
@@ -59,13 +73,18 @@ internal sealed class TransmitterForm : Form
             Minimum = 1,
             Maximum = 6000,
             Value = 427.250M,
-            Location = new Point(100, 72),
-            Size = new Size(120, 23),
+            Location = new Point(350, 72),
+            Size = new Size(100, 23),
+        };
+        _frequencyUpDown.ValueChanged += (_, _) => 
+        {
+            if (_presetComboBox.SelectedItem is AtvChannel ch && ch.FrequencyMhz != _frequencyUpDown.Value)
+                _presetComboBox.SelectedIndex = 0; // Switch to "Custom" if manual freq change
         };
 
-        var mhzLabel1 = new Label { Text = "MHz", AutoSize = true, Location = new Point(228, 76) };
+        var mhzLabel1 = new Label { Text = "MHz", AutoSize = true, Location = new Point(455, 76) };
 
-        var bandwidthLabel = new Label { Text = "Bandwidth:", AutoSize = true, Location = new Point(300, 76) };
+        var bandwidthLabel = new Label { Text = "Bandwidth:", AutoSize = true, Location = new Point(20, 118) };
         _bandwidthTrackBar = new TrackBar
         {
             Minimum = 2, // Start at 1.0 MHz (2 * 0.5)
@@ -74,7 +93,7 @@ internal sealed class TransmitterForm : Form
             SmallChange = 1,
             LargeChange = 1,
             Value = 4, // Default 2.0 MHz
-            Location = new Point(384, 64),
+            Location = new Point(100, 106),
             Size = new Size(170, 45),
         };
         _bandwidthTrackBar.ValueChanged += (_, _) => UpdateBandwidthLabel();
@@ -83,24 +102,24 @@ internal sealed class TransmitterForm : Form
         {
             Text = "2.0 MHz",
             AutoSize = true,
-            Location = new Point(562, 76),
+            Location = new Point(280, 118),
         };
 
-        var gainLabel = new Label { Text = "TX Gain:", AutoSize = true, Location = new Point(20, 118) };
+        var gainLabel = new Label { Text = "TX Gain:", AutoSize = true, Location = new Point(350, 118) };
         _gainUpDown = new NumericUpDown
         {
             Minimum = 0,
             Maximum = 47,
             Value = 30,
-            Location = new Point(100, 114),
-            Size = new Size(80, 23),
+            Location = new Point(410, 114),
+            Size = new Size(60, 23),
         };
 
         _ampCheckBox = new CheckBox
         {
             Text = "Enable HackRF amp",
             AutoSize = true,
-            Location = new Point(220, 116),
+            Location = new Point(480, 116),
         };
 
         var callsignLabel = new Label { Text = "Callsign:", AutoSize = true, Location = new Point(20, 158) };
@@ -146,6 +165,8 @@ internal sealed class TransmitterForm : Form
         settingsGroup.Controls.Add(deviceLabel);
         settingsGroup.Controls.Add(_deviceComboBox);
         settingsGroup.Controls.Add(_refreshDevicesButton);
+        settingsGroup.Controls.Add(presetLabel);
+        settingsGroup.Controls.Add(_presetComboBox);
         settingsGroup.Controls.Add(frequencyLabel);
         settingsGroup.Controls.Add(_frequencyUpDown);
         settingsGroup.Controls.Add(mhzLabel1);
@@ -175,6 +196,19 @@ internal sealed class TransmitterForm : Form
         Controls.Add(_logTextBox);
 
         UpdateBandwidthLabel();
+        
+        // Select default preset if matches (e.g. 427.25)
+        foreach (var item in _presetComboBox.Items)
+        {
+            if (item is AtvChannel ch && ch.FrequencyMhz == _frequencyUpDown.Value)
+            {
+                _presetComboBox.SelectedItem = item;
+                break;
+            }
+        }
+        if (_presetComboBox.SelectedIndex == -1)
+            _presetComboBox.SelectedIndex = 0; // Custom
+
         Load += (_, _) => RefreshDevices();
         FormClosing += (_, _) =>
         {
@@ -184,6 +218,14 @@ internal sealed class TransmitterForm : Form
                 _session = null;
             }
         };
+    }
+
+    private void PresetChanged(object? sender, EventArgs e)
+    {
+        if (_presetComboBox.SelectedItem is AtvChannel ch && ch.FrequencyMhz > 0)
+        {
+            _frequencyUpDown.Value = ch.FrequencyMhz;
+        }
     }
 
     private void RefreshDevices()
